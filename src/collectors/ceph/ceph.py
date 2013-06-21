@@ -94,6 +94,22 @@ class CephCollector(diamond.collector.Collector):
             base = base[len(self.config['socket_prefix']):]
         return 'ceph.' + base
 
+    def _popen_check_output(self, *popenargs):
+        """
+        Collect Popen output and check for errors.
+
+        This is inspired by subprocess.check_output, added in Python 2.7. This
+        method provides similar functionality but will work with Python 2.6.
+        """
+        process = subprocess.Popen(*popenargs, stdout=subprocess.PIPE)
+        output, unused_err = process.communicate()
+        retcode = process.poll()
+        if retcode:
+            msg = "Command '%s' exited with non-zero status %d" % \
+                    (popenargs[0], retcode)
+            raise Exception(msg)
+        return output
+
     def _get_stats_from_socket(self, name):
         """Return the parsed JSON data returned when ceph is told to
         dump the stats from the named socket.
@@ -102,18 +118,11 @@ class CephCollector(diamond.collector.Collector):
         an empty result set is returned.
         """
         try:
-            json_blob = subprocess.check_output(
-                [self.config['ceph_binary'],
-                 '--admin-daemon',
-                 name,
-                 'perf',
-                 'dump',
-                 ])
-        except subprocess.CalledProcessError, err:
-            self.log.info('Could not get stats from %s: %s',
-                          name, err)
-            self.log.exception('Could not get stats from %s' % name)
-            return {}
+            json_blob = self._popen_check_output([self.config['ceph_binary'],
+                '--admin-daemon', name, 'perf', 'dump'])
+        except Exception:
+            self.log.error('Could not read stats from %s', name)
+            raise
 
         try:
             json_data = json.loads(json_blob)
