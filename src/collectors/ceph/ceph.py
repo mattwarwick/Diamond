@@ -110,32 +110,24 @@ class CephCollector(diamond.collector.Collector):
             raise Exception(msg)
         return output
 
-    def _get_stats_from_socket(self, name):
-        """Return the parsed JSON data returned when ceph is told to
-        dump the stats from the named socket.
-
-        In the event of an error error, the exception is logged, and
-        an empty result set is returned.
-        """
+    def _get_admin_socket_json(self, name, args):
+        """Read and parse JSON from Ceph daemon admin socket"""
+        bin = self.config['ceph_binary']
+        cmd = [bin, '--admin-daemon', name] + args.split()
+        json_str = self._popen_check_output(cmd)
         try:
-            json_blob = self._popen_check_output([self.config['ceph_binary'],
-                '--admin-daemon', name, 'perf', 'dump'])
+            return json.loads(json_str)
         except Exception:
-            self.log.error('Could not read stats from %s', name)
+            self.log.error('Could not parse JSON output from %s', name)
             raise
 
-        try:
-            json_data = json.loads(json_blob)
-        except Exception, err:
-            self.log.info('Could not parse stats from %s: %s',
-                          name, err)
-            self.log.exception('Could not parse stats from %s' % name)
-            return {}
-
-        return json_data
+    def _get_perf_counters(self, name):
+        """Return perf counters from admin socket."""
+        counters = self._get_admin_socket_json(name, "perf dump")
+        return counters
 
     def _publish_stats(self, counter_prefix, stats):
-        """Given a stats dictionary from _get_stats_from_socket,
+        """Given a stats dictionary from _get_perf_counters,
         publish the individual values.
         """
         for stat_name, stat_value in flatten_dictionary(
@@ -151,6 +143,6 @@ class CephCollector(diamond.collector.Collector):
         for path in self._get_socket_paths():
             self.log.debug('checking %s', path)
             counter_prefix = self._get_counter_prefix_from_socket_name(path)
-            stats = self._get_stats_from_socket(path)
+            stats = self._get_perf_counters(path)
             self._publish_stats(counter_prefix, stats)
         return
