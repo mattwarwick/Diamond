@@ -24,11 +24,12 @@ import subprocess
 
 import diamond.collector
 
+# Metric name/path separator
+_PATH_SEP = "."
 
-def flatten_dictionary(input, sep='.', prefix=None):
-    """Produces iterator of pairs where the first value is
-    the joined key names and the second value is the value
-    associated with the lowest level key. For example::
+def flatten_dictionary(input, path=[]):
+    """Produces iterator of pairs where the first value is the key path and
+    the second value is the value associated with the key. For example::
 
       {'a': {'b': 10},
        'c': 20,
@@ -36,15 +37,16 @@ def flatten_dictionary(input, sep='.', prefix=None):
 
     produces::
 
-      [('a.b', 10), ('c', 20)]
+      [([a,b], 10), ([c], 20)]
     """
     for name, value in sorted(input.items()):
-        fullname = sep.join(filter(None, [prefix, name]))
+        path.append(name)
         if isinstance(value, dict):
-            for result in flatten_dictionary(value, sep, fullname):
+            for result in flatten_dictionary(value, path):
                 yield result
         else:
-            yield (fullname, value)
+            yield (path, value)
+        del path[-1]
 
 
 class CephCollector(diamond.collector.Collector):
@@ -130,11 +132,9 @@ class CephCollector(diamond.collector.Collector):
         """Given a stats dictionary from _get_perf_counters,
         publish the individual values.
         """
-        for stat_name, stat_value in flatten_dictionary(
-            stats,
-            prefix=counter_prefix,
-        ):
-            self.publish_gauge(stat_name, stat_value)
+        for path, value in flatten_dictionary(stats):
+            name = _PATH_SEP.join(filter(None, [counter_prefix] + path))
+            self.publish_gauge(name, value)
 
     def collect(self):
         """
