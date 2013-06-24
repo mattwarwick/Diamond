@@ -23,9 +23,19 @@ import os
 import subprocess
 
 import diamond.collector
+import diamond.convertor
 
 # Metric name/path separator
 _PATH_SEP = "."
+
+_NSEC_PER_SEC = 1000000000
+
+# Performance metric data types
+_PERFCOUNTER_NONE = 0
+_PERFCOUNTER_TIME = 0x1
+_PERFCOUNTER_U64 = 0x2
+_PERFCOUNTER_LONGRUNAVG = 0x4
+_PERFCOUNTER_COUNTER = 0x8
 
 def flatten_dictionary(input, path=[]):
     """Produces iterator of pairs where the first value is the key path and
@@ -45,9 +55,19 @@ def flatten_dictionary(input, path=[]):
             for result in flatten_dictionary(value, path):
                 yield result
         else:
-            yield (path, value)
+            yield (path[:], value)
         del path[-1]
 
+def lookup_dict_path(d, path, extra=[]):
+    """Lookup value in dictionary based on path + extra.
+
+    For instance, [a,b,c] -> d[a][b][c]
+    """
+    element = None
+    for component in path + extra:
+        d = d[component]
+        element = d
+    return element
 
 class CephCollector(diamond.collector.Collector):
 
@@ -113,28 +133,154 @@ class CephCollector(diamond.collector.Collector):
         return output
 
     def _get_admin_socket_json(self, name, args):
-        """Read and parse JSON from Ceph daemon admin socket"""
+        """Return parsed JSON from Ceph daemon admin socket.
+
+        Values are decoded into Python types automatically, except for
+        floating point numbers. Currently, time is the only value logged with
+        a floating point number format, but is not actually a fractional value
+        as the format would imply. Floats are handled on a case-by-case basis.
+
+        Args:
+            name: path to admin socket
+            args: arguments to pass to admin socket
+        Returns:
+            Parsed JSON as dictionary
+        """
         bin = self.config['ceph_binary']
         cmd = [bin, '--admin-daemon', name] + args.split()
         json_str = self._popen_check_output(cmd)
         try:
-            return json.loads(json_str)
+            # do not decode floats; leave as input string
+            return json.loads(json_str, parse_float=lambda v: v)
         except Exception:
             self.log.error('Could not parse JSON output from %s', name)
             raise
 
     def _get_perf_counters(self, name):
-        """Return perf counters from admin socket."""
-        counters = self._get_admin_socket_json(name, "perf dump")
-        return counters
+        """Return perf counters and schema from admin socket.
 
-    def _publish_stats(self, counter_prefix, stats):
-        """Given a stats dictionary from _get_perf_counters,
-        publish the individual values.
+        Args:
+            name: path to admin socket
+
+        Returns:
+            Tuple (counters, schema)
         """
-        for path, value in flatten_dictionary(stats):
-            name = _PATH_SEP.join(filter(None, [counter_prefix] + path))
-            self.publish_gauge(name, value)
+        counters = self._get_admin_socket_json(name, "perf dump")
+        schema = self._get_admin_socket_json(name, "perf schema")
+        return counters, schema
+
+    def _ceph_time_to_seconds(self, val):
+        """Convert Ceph time format into seconds.
+
+        Args:
+            val: string in format "seconds.nanoseconds"
+
+        Returns:
+            Time in seconds as a floating point number.
+        """
+        sec, nsec = map(lambda v: long(v), val.split("."))
+        return float(sec * _NSEC_PER_SEC + nsec) / float(_NSEC_PER_SEC)
+
+    def _get_byte_metrics(self, name, metric_value):
+        """Return list of metrics derived from byte units.
+
+        Args:
+            name: the name of the metric
+            metric_value: the value of the metric in bytes
+
+        Returns:
+            List of (name, value) pairs for each unit.
+        """
+        assert name.endswith("bytes")
+        result = []
+        for unit in self.config['byte_unit']:
+            new_value = diamond.convertor.binary.convert(
+                    value = metric_value, oldUnit = 'byte', newUnit = unit)
+            new_name = name.replace("bytes", unit)
+            result.append((new_name, new_value))
+        return result
+
+    def _publish_longrunavg(self, counter_prefix, stats, path, type):
+        """Publish a long-running average metric.
+
+        A long-running metric has two components: 'avgcount' and 'sum'. We
+        publish a derived average metric named avg_<origname> in place of the
+        raw average components.
+
+        Args:
+            counter_prefix: string prefixed to metric names
+            stats: dictionary containing performance counters
+            path: full path of the metric name (e.g. [osd, op_rw_rlat])
+            type: the metric type taken from the schema
+        """
+        # lookup metric component values
+        sum = lookup_dict_path(stats, path, ['sum'])
+        count = lookup_dict_path(stats, path, ['avgcount'])
+
+        # perform metric-specific conversions
+        if type & _PERFCOUNTER_TIME:
+            sum = self._ceph_time_to_seconds(sum)
+
+        # TODO: should count = 0 metrics even be published?
+        average = sum / count if count else 0.0
+
+        # create new name: prefix "avg_" to the metric name
+        path[-1] = "avg_%s" % (path[-1],)
+        name = _PATH_SEP.join(filter(None, [counter_prefix] + path))
+
+        # Times are logged with microsecond resolution. This accuracy level
+        # could be necessary with latency against SSDs, cache-hits, and
+        # metrics such as lock wait times.
+        if type & _PERFCOUNTER_TIME:
+            self.publish_gauge(name, average, 6)
+
+        elif type & _PERFCOUNTER_U64:
+            if name.endswith("bytes"):    # byte-counting naming convention
+                for name, value in self._get_byte_metrics(name, average):
+                    self.publish_gauge(name, value, 2)
+            else:
+                self.publish_gauge(name, average, 2)
+        else:
+            self.log.error("Unexpected metric type: %s/%d", name, type)
+
+    def _publish_stats(self, counter_prefix, stats, schema):
+        """Publish a set of performance counters.
+
+        Args:
+            counter_prefix: string prefixed to metric names
+            stats: dictionary containing performance counters
+            schema: performance counter schema
+        """
+        for path, type in flatten_dictionary(schema):
+            # remove 'type' component to get metric name
+            assert path[-1] == 'type'
+            del path[-1]
+
+            if type & _PERFCOUNTER_LONGRUNAVG:
+                self._publish_longrunavg(counter_prefix, stats, path, type)
+            else:
+                name = _PATH_SEP.join(filter(None, [counter_prefix] + path))
+                value = lookup_dict_path(stats, path)
+
+                if type & _PERFCOUNTER_TIME:
+                    value = self._ceph_time_to_seconds(value)
+                    self.publish_gauge(name, value, 6)
+
+                elif type & _PERFCOUNTER_U64:
+                    # create a list of values to log. we'll either log a list
+                    # of derived metrics, or the single metric we began with.
+                    if name.endswith("bytes"):
+                        values = self._get_byte_metrics(name, value)
+                    else:
+                        values = [(name, value)]
+
+                    for name, value in values:
+                        if type & _PERFCOUNTER_COUNTER:
+                            self.publish_counter(name, value, 2)
+                        else:
+                            self.publish_gauge(name, value, 2)
+                else:
+                    self.log.error("Unexpected metric type: %s/%d", name, type)
 
     def collect(self):
         """
@@ -143,6 +289,6 @@ class CephCollector(diamond.collector.Collector):
         for path in self._get_socket_paths():
             self.log.debug('checking %s', path)
             counter_prefix = self._get_counter_prefix_from_socket_name(path)
-            stats = self._get_perf_counters(path)
-            self._publish_stats(counter_prefix, stats)
+            stats, schema = self._get_perf_counters(path)
+            self._publish_stats(counter_prefix, stats, schema)
         return
