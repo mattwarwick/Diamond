@@ -114,7 +114,7 @@ class CephCollector(diamond.collector.Collector):
         base = os.path.splitext(os.path.basename(name))[0]
         if base.startswith(self.config['socket_prefix']):
             base = base[len(self.config['socket_prefix']):]
-        return 'ceph.' + base
+        return 'ceph.' + base.replace(".", "-")
 
     def _popen_check_output(self, *popenargs):
         """
