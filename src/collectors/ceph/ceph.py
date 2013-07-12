@@ -221,12 +221,15 @@ class CephCollector(diamond.collector.Collector):
         if type & _PERFCOUNTER_TIME:
             sum = self._ceph_time_to_seconds(sum)
 
-        # TODO: should count = 0 metrics even be published?
-        average = sum / count if count else 0.0
-
         # create new name: prefix "avg_" to the metric name
         path[-1] = "avg_%s" % (path[-1],)
         name = _PATH_SEP.join(filter(None, [counter_prefix] + path))
+
+        if count == 0:
+            self.log.info("Not publishing zero-count avg: %s", name)
+            return
+
+        average = float(sum) / count
 
         # Times are logged with microsecond resolution. This accuracy level
         # could be necessary with latency against SSDs, cache-hits, and
