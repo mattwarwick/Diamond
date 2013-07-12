@@ -123,14 +123,14 @@ class CephCollector(diamond.collector.Collector):
         This is inspired by subprocess.check_output, added in Python 2.7. This
         method provides similar functionality but will work with Python 2.6.
         """
-        process = subprocess.Popen(*popenargs, stdout=subprocess.PIPE)
-        output, unused_err = process.communicate()
+        process = subprocess.Popen(*popenargs, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        output, err = process.communicate()
         retcode = process.poll()
         if retcode:
             msg = "Command '%s' exited with non-zero status %d" % \
                     (popenargs[0], retcode)
             raise Exception(msg)
-        return output
+        return output, err
 
     def _get_admin_socket_json(self, name, args):
         """Return parsed JSON from Ceph daemon admin socket.
@@ -148,12 +148,14 @@ class CephCollector(diamond.collector.Collector):
         """
         bin = self.config['ceph_binary']
         cmd = [bin, '--admin-daemon', name] + args.split()
-        json_str = self._popen_check_output(cmd)
+        json_str, err = self._popen_check_output(cmd)
         try:
             # do not decode floats; leave as input string
             return json.loads(json_str, parse_float=lambda v: v)
         except Exception:
             self.log.error('Could not parse JSON output from %s', name)
+            self.log.error('  stderr: %s', err)
+            self.log.error('  json_str_len: %d', len(json_str))
             raise
 
     def _get_perf_counters(self, name):
@@ -292,6 +294,9 @@ class CephCollector(diamond.collector.Collector):
         for path in self._get_socket_paths():
             self.log.debug('checking %s', path)
             counter_prefix = self._get_counter_prefix_from_socket_name(path)
-            stats, schema = self._get_perf_counters(path)
+            try:
+                stats, schema = self._get_perf_counters(path)
+            except Exception:
+                self.log.exception('Skipping due to error: %s', path) 
             self._publish_stats(counter_prefix, stats, schema)
         return
