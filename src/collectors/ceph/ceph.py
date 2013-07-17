@@ -291,7 +291,9 @@ class CephCollector(diamond.collector.Collector):
         """
         Collect stats
         """
-        for path in self._get_socket_paths():
+        socket_paths = self._get_socket_paths()
+        self.log.info('Checking %d Ceph socket paths...', len(socket_paths))
+        for path in socket_paths:
             self.log.debug('checking %s', path)
             counter_prefix = self._get_counter_prefix_from_socket_name(path)
             try:
