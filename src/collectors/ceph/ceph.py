@@ -209,44 +209,61 @@ class CephCollector(diamond.collector.Collector):
         publish a derived average metric named avg_<origname> in place of the
         raw average components.
 
+        For a given long-running average metric with name <metric>, we publish
+        the following derived metrics:
+
+            <metric>.sum
+            <metric>.count
+            <metric>.avg
+            <metric>.last_interval_avg
+
         Args:
             counter_prefix: string prefixed to metric names
             stats: dictionary containing performance counters
             path: full path of the metric name (e.g. [osd, op_rw_rlat])
             type: the metric type taken from the schema
         """
-        # lookup metric component values
-        sum = lookup_dict_path(stats, path, ['sum'])
-        count = lookup_dict_path(stats, path, ['avgcount'])
+        # name of <metric>
+        base_name = _PATH_SEP.join(filter(None, [counter_prefix] + path))
+        total_sum_name = "%s%s%s" % (base_name, _PATH_SEP, "sum")
+        total_count_name = "%s%s%s" % (base_name, _PATH_SEP, "count")
+        total_avg_name = "%s%s%s" % (base_name, _PATH_SEP, "avg")
+        delta_sum_name = "%s%s%s" % (base_name, _PATH_SEP, "delta_sum")
+        delta_count_name = "%s%s%s" % (base_name, _PATH_SEP, "delta_count")
+        delta_avg_name = "%s%s%s" % (base_name, _PATH_SEP, "last_interval_avg")
 
-        # perform metric-specific conversions
+        # lookup raw metric component values
+        total_sum = lookup_dict_path(stats, path, ['sum'])
+        total_count = lookup_dict_path(stats, path, ['avgcount'])
+
+        # perform metric-specific type conversions
         if type & _PERFCOUNTER_TIME:
-            sum = self._ceph_time_to_seconds(sum)
+            total_sum = self._ceph_time_to_seconds(total_sum)
 
-        # create new name: prefix "avg_" to the metric name
-        path[-1] = "avg_%s" % (path[-1],)
-        name = _PATH_SEP.join(filter(None, [counter_prefix] + path))
+        # calculate deltas since last time we queried admin socket
+        delta_sum = self.derivative(delta_sum_name, total_sum, time_delta=False)
+        delta_count = self.derivative(delta_count_name, total_count, time_delta=False)
 
-        if count == 0:
-            self.log.info("Not publishing zero-count avg: %s", name)
+        # prune out idle metrics
+        if total_count == 0:
             return
 
-        average = float(sum) / count
+        # average since ceph daemon started
+        total_avg = float(total_sum) / float(total_count)
 
-        # Times are logged with microsecond resolution. This accuracy level
-        # could be necessary with latency against SSDs, cache-hits, and
-        # metrics such as lock wait times.
-        if type & _PERFCOUNTER_TIME:
-            self.publish_gauge(name, average, 6)
-
-        elif type & _PERFCOUNTER_U64:
-            if name.endswith("bytes"):    # byte-counting naming convention
-                for name, value in self._get_byte_metrics(name, average):
-                    self.publish_gauge(name, value, 2)
-            else:
-                self.publish_gauge(name, average, 2)
+        # average in the last collection interval
+        if delta_count == 0:
+            delta_avg = 0
         else:
-            self.log.error("Unexpected metric type: %s/%d", name, type)
+            delta_avg = float(delta_sum) / float(delta_count)
+
+        # publish raw data
+        self.publish_gauge(total_sum_name, total_sum)
+        self.publish_gauge(total_count_name, total_count)
+
+        # publish averages
+        self.publish_gauge(total_avg_name, total_avg, 6)
+        self.publish_gauge(delta_avg_name, delta_avg, 6)
 
     def _publish_stats(self, counter_prefix, stats, schema):
         """Publish a set of performance counters.
