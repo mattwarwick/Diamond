@@ -206,15 +206,15 @@ class CephCollector(diamond.collector.Collector):
         """Publish a long-running average metric.
 
         A long-running metric has two components: 'avgcount' and 'sum'. We
-        publish a derived average metric named avg_<origname> in place of the
-        raw average components.
+        publish both the raw components, and a derived metric named
+        <metric>.last_interval_avg that is the average since the last run of
+        the collector.
 
         For a given long-running average metric with name <metric>, we publish
         the following derived metrics:
 
             <metric>.sum
             <metric>.count
-            <metric>.avg
             <metric>.last_interval_avg
 
         Args:
@@ -227,7 +227,6 @@ class CephCollector(diamond.collector.Collector):
         base_name = _PATH_SEP.join(filter(None, [counter_prefix] + path))
         total_sum_name = "%s%s%s" % (base_name, _PATH_SEP, "sum")
         total_count_name = "%s%s%s" % (base_name, _PATH_SEP, "count")
-        total_avg_name = "%s%s%s" % (base_name, _PATH_SEP, "avg")
         delta_sum_name = "%s%s%s" % (base_name, _PATH_SEP, "delta_sum")
         delta_count_name = "%s%s%s" % (base_name, _PATH_SEP, "delta_count")
         delta_avg_name = "%s%s%s" % (base_name, _PATH_SEP, "last_interval_avg")
@@ -248,9 +247,6 @@ class CephCollector(diamond.collector.Collector):
         if total_count == 0:
             return
 
-        # average since ceph daemon started
-        total_avg = float(total_sum) / float(total_count)
-
         # average in the last collection interval
         if delta_count == 0:
             delta_avg = 0
@@ -262,7 +258,6 @@ class CephCollector(diamond.collector.Collector):
         self.publish_gauge(total_count_name, total_count)
 
         # publish averages
-        self.publish_gauge(total_avg_name, total_avg, 6)
         self.publish_gauge(delta_avg_name, delta_avg, 6)
 
     def _publish_stats(self, counter_prefix, stats, schema):
